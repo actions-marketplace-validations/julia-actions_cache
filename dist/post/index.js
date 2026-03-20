@@ -87209,12 +87209,17 @@ async function run() {
         // Don't save if we got an exact cache hit (cache is already up to date)
         if (cacheMatchedKey === cacheKey) {
             core.info('Cache hit occurred on the exact key, not saving cache.');
-        } else if (cachePaths.length > 0) {
+            return;
+        }
+
+        let cacheSaved = false;
+        if (cachePaths.length > 0) {
             // Save the cache
             core.info(`Saving cache with key: ${cacheKey}`);
             try {
                 await cache.saveCache(cachePaths, cacheKey);
                 core.info('Cache saved successfully');
+                cacheSaved = true;
             } catch (error) {
                 if (error.name === 'ReserveCacheError') {
                     core.info('Cache already exists, skipping save.');
@@ -87222,6 +87227,11 @@ async function run() {
                     core.warning(`Failed to save cache: ${error.message}`);
                 }
             }
+        }
+
+        if (!cacheSaved) {
+            core.info('No new cache was saved. Skipping old cache deletion.');
+            return;
         }
 
         // Check if on default branch
