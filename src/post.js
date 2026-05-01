@@ -3,6 +3,7 @@ import * as exec from '@actions/exec';
 import * as cache from '@actions/cache';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { Storage as GoogleCloudStorage } from '@google-cloud/storage';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 async function run() {
@@ -18,6 +19,7 @@ async function run() {
         const repository = core.getState('repository');
         const ref = core.getState('ref');
         const defaultBranch = core.getState('default-branch');
+        const gcpBucket = core.getState('gcp-bucket');
 
         if (!cachePathsJson || !cacheKey) {
             core.info('No cache state found. Skipping post action.');
@@ -47,17 +49,47 @@ async function run() {
 
         let cacheSaved = false;
         if (cachePaths.length > 0) {
-            // Save the cache
-            core.info(`Saving cache with key: ${cacheKey}`);
-            try {
-                await cache.saveCache(cachePaths, cacheKey);
-                core.info('Cache saved successfully');
-                cacheSaved = true;
-            } catch (error) {
-                if (error.name === 'ReserveCacheError') {
-                    core.info('Cache already exists, skipping save.');
-                } else {
-                    core.warning(`Failed to save cache: ${error.message}`);
+            if (gcpBucket) {
+                // Save the cache to Google Cloud Storage
+                core.info(`Saving cache to GCS with key: ${cacheKey}`);
+                try {
+                    const tarPath = process.platform === 'win32'
+                        ? `${process.env.RUNNER_TEMP || 'C:\\Windows\\Temp'}\\cache.tar.gz`
+                        : `${process.env.RUNNER_TEMP || '/tmp'}/cache.tar.gz`;
+
+                    const depotPath = core.getState('depot');
+                    const cwd = process.platform === 'win32' && depotPath ? depotPath.split(':')[0] + ':/' : '/';
+                    const excludePaths = cachePaths.filter(p => p.startsWith('!')).map(p => `--exclude=${path.relative(cwd, p.slice(1))}`);
+                    const includePaths = cachePaths.filter(p => !p.startsWith('!')).map(p => path.relative(cwd, p));
+
+                    await exec.exec('tar', ['-zcf', tarPath, ...excludePaths, ...includePaths], { cwd: cwd });
+
+                    const storage = new GoogleCloudStorage();
+                    const bucket = storage.bucket(gcpBucket);
+
+                    // Upload exact match
+                    await bucket.upload(tarPath, { destination: `${cacheKey}.tar.gz` });
+                    // Upload restore key (latest fallback)
+                    await bucket.upload(tarPath, { destination: `${restoreKey}.tar.gz` });
+
+                    core.info('Cache saved to GCS successfully');
+                    cacheSaved = true;
+                } catch (error) {
+                    core.warning(`Failed to save cache to GCS: ${error.message}`);
+                }
+            } else {
+                // Save the cache to GitHub Actions
+                core.info(`Saving cache with key: ${cacheKey}`);
+                try {
+                    await cache.saveCache(cachePaths, cacheKey);
+                    core.info('Cache saved successfully');
+                    cacheSaved = true;
+                } catch (error) {
+                    if (error.name === 'ReserveCacheError') {
+                        core.info('Cache already exists, skipping save.');
+                    } else {
+                        core.warning(`Failed to save cache: ${error.message}`);
+                    }
                 }
             }
         }

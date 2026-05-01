@@ -3,6 +3,8 @@ import * as exec from '@actions/exec';
 import * as cache from '@actions/cache';
 import fs from 'fs';
 import os from 'os';
+import path from 'path';
+import { Storage as GoogleCloudStorage } from '@google-cloud/storage';
 
 async function run() {
     try {
@@ -19,6 +21,7 @@ async function run() {
         const deleteOldCaches = core.getInput('delete-old-caches');
         const token = core.getInput('token');
         const saveAlways = core.getInput('save-always') === 'true';
+        const gcpBucket = core.getInput('gcp-bucket');
 
         // Determine depot path
         let depotPath;
@@ -144,21 +147,61 @@ async function run() {
         core.saveState('repository', repository);
         core.saveState('ref', ref);
         core.saveState('default-branch', defaultBranch);
+        core.saveState('gcp-bucket', gcpBucket);
 
         // Restore cache
         let cacheHit = '';
         if (cachePaths.length > 0) {
-            try {
-                const restoredKey = await cache.restoreCache(cachePaths, key, [restoreKey]);
-                if (restoredKey) {
-                    cacheHit = restoredKey === key ? 'true' : '';
-                    core.info(`Cache restored from key: ${restoredKey}`);
-                    core.saveState('cache-matched-key', restoredKey);
-                } else {
-                    core.info('No cache found');
+            if (gcpBucket) {
+                try {
+                    const tarPath = process.platform === 'win32'
+                        ? `${process.env.RUNNER_TEMP || 'C:\\Windows\\Temp'}\\cache.tar.gz`
+                        : `${process.env.RUNNER_TEMP || '/tmp'}/cache.tar.gz`;
+
+                    const storage = new GoogleCloudStorage();
+                    const bucket = storage.bucket(gcpBucket);
+                    let restoredKey = '';
+
+                    const exactFile = bucket.file(`${key}.tar.gz`);
+                    const [exactExists] = await exactFile.exists();
+
+                    if (exactExists) {
+                        await exactFile.download({ destination: tarPath });
+                        restoredKey = key;
+                    } else {
+                        const restoreFile = bucket.file(`${restoreKey}.tar.gz`);
+                        const [restoreExists] = await restoreFile.exists();
+                        if (restoreExists) {
+                            await restoreFile.download({ destination: tarPath });
+                            restoredKey = restoreKey;
+                        }
+                    }
+
+                    if (restoredKey) {
+                        cacheHit = restoredKey === key ? 'true' : '';
+                        core.info(`Cache restored from GCS key: ${restoredKey}`);
+                        core.saveState('cache-matched-key', restoredKey);
+                        const cwd = process.platform === 'win32' ? depotPath.split(':')[0] + ':/' : '/';
+                        await exec.exec('tar', ['-zxf', tarPath], { cwd: cwd });
+                    } else {
+                        core.info('No cache found in GCS');
+                    }
+                } catch (error) {
+                    core.warning(`Failed to restore cache from GCS: ${error.message}`);
                 }
-            } catch (error) {
-                core.warning(`Failed to restore cache: ${error.message}`);
+            } else {
+                try {
+                    const restoredKey = await cache.restoreCache(cachePaths, key, [restoreKey]);
+                    if (restoredKey) {
+                        cacheHit = restoredKey === key ? 'true' : '';
+                        core.info(`Cache restored from key: ${restoredKey}`);
+                        core.saveState('cache-matched-key', restoredKey);
+                    } else {
+                        core.info('No cache found');
+                    }
+                } catch (error) {
+                    core.warning(`Failed to restore cache: ${error.message}`);
+                }
             }
         }
 
